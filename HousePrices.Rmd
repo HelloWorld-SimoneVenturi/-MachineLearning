@@ -1,0 +1,305 @@
+---
+title: "Previsione del prezzo delle case a Boston"
+author: "Simone Venturi"
+date: "8/11/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Viene caricato il dataset Boston.csv contenente 506 osservazioni di 14 attributi, 
+nel quale si è interessati a prevedere il valore mediano del prezzo delle case a Boston 
+in 1000$ (medv), rispetto alle restanti variabili. 
+
+```{r, out.width = "85%", fig.align='center',include=FALSE}
+#Caricamento delle librerie
+library(glmnet) #package per metodi ridge regression e lasso
+library(car) #contiene funzioni utili per la regressione lineare
+library(olsrr) #contiene procedure stepwise
+library(factoextra) #serve per i grafici
+library(corrplot) #serve per disegnare il correlation panel 
+library(DAAG)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(pls)
+```
+
+Come prima cosa, viene effettuato un data cleaning:
+
+```{r, out.width = "85%", fig.align='center'}
+#Caricamento del dataset
+data<-read_delim("~/St. mat. avanzata/Boston.csv")
+#Eliminazione della prima colonna enumerativa superflua
+data<-data[,-1]
+#Verifica della presenza di valori mancanti
+sum(is.na(data))
+#Le variabili coinvolte sono (una descrizione più approfondita della variabili 
+#è reperibile in rete):
+names(data)
+
+#Gestione di eventuali outlier
+
+#viene disegnato un boxplot riferito alle variabili in gioco. Sono in oltre 
+#disegnate alcune
+#abline di colore diverso in corrispondenza di minimo, massimo;e di primo 
+#quartile e terzo quartile delle variabili 
+#medv e black.
+
+par(mfrow = c(1,2))
+boxplot(data)
+abline(h = min(data), col = "Blue")
+abline(h = max(data), col = "Yellow")
+
+abline(h = quantile(data$medv, c(0.25, 0.75)), col = "Red")
+abline(h = quantile(data$black, c(0.25, 0.75)), col = "Red")
+
+#I valori anomali sono sostituiti con 95 percentile o 5 percentile della 
+#variabile considerata
+
+caps <- quantile(data$medv, probs=c(.05, .95), na.rm = T)
+data$medv <- ifelse (data$medv < caps[1],caps[1],data$medv)
+data$medv <- ifelse (data$medv > caps[2],caps[2],data$medv)  
+
+caps <- quantile(data$indus, probs=c(.05, .95), na.rm = T)
+data$indus <- ifelse (data$indus < caps[1],caps[1],data$indus)
+data$indus <- ifelse (data$indus > caps[2],caps[2],data$indus) 
+
+caps <- quantile(data$crim, probs=c(.05, .95), na.rm = T)
+data$crim <- ifelse (data$crim < caps[1],caps[1],data$crim)
+data$crim <- ifelse (data$crim > caps[2],caps[2],data$crim)  
+
+caps <- quantile(data$dis, probs=c(.05, .95), na.rm = T)
+data$dis <- ifelse (data$dis < caps[1],caps[1],data$dis)
+data$dis <- ifelse (data$dis > caps[2],caps[2],data$dis)  
+
+caps <- quantile(data$tax, probs=c(.05, .95), na.rm = T)
+data$tax <- ifelse (data$tax < caps[1],caps[1],data$tax)
+data$tax <- ifelse (data$tax > caps[2],caps[2],data$tax)  
+
+caps <- quantile(data$rad, probs=c(.05, .95), na.rm = T)
+data$rad <- ifelse (data$rad < caps[1],caps[1],data$rad)
+data$rad <- ifelse (data$rad > caps[2],caps[2],data$rad) 
+
+caps <- quantile(data$zn, probs=c(.05, .95), na.rm = T)
+data$zn <- ifelse (data$zn < caps[1],caps[1],data$zn)
+data$zn <- ifelse (data$zn > caps[2],caps[2],data$zn)  
+
+caps <- quantile(data$black, probs=c(.05, .95), na.rm = T)
+data$black <- ifelse (data$black < caps[1],caps[1],data$black)
+data$black <- ifelse (data$black > caps[2],caps[2],data$black)  
+
+boxplot(data)
+```
+
+Una volta effettuata la prima fase di pulizia dei dati, questi vengono divisi in training e test set. 
+
+```{r, out.width = "85%", fig.align='center'}
+#TRAINING E TEST SET
+set.seed(1)
+
+dt = sort(sample(nrow(data), nrow(data)*.75))
+train<-data[dt,]
+test<-data[-dt,]
+rm(dt)
+```
+
+Viene quindi impostato un modello di regressione lineare per prevedere la risposta medv:
+
+```{r, out.width = "85%", fig.align='center'}
+#metodo ML
+
+modellolm<-lm(medv~., data=train)
+summary(modellolm)
+```
+Dal summary è possibile constatare che le variabili crim e indus sono particolarmente poco significative. La significatività del modello globale è invece buona, e i valori del R-squared e dell'adjusted R-squared sufficientemente elevati.
+Questo primo modello sembra quindi evidenziare che per prevedere il prezzo delle case a Boston, oltre alle covariate valutate molto sigificative ovviamente, non sia di considerevole aiuto l'aggiunta di crim (il tasso di criminalità pro capite) e indus (la proporzione di acri commerciali non al dettaglio). 
+Proseguendo nell'analisi del modello ML, vengono ora verificate le ipotesi:
+
+```{r, out.width = "85%", fig.align='center'}
+#scatterplot dei residui vs valori stimati
+plot(modellolm$fitted.values, modellolm$residuals, 
+     main='Residui vs valori stimati', lwd=2, xlab='Y stimati', ylab='Residui')
+abline(h=0, lwd=2)
+
+#QQ Plot dei residui
+qqPlot(modellolm$residuals,distribution = "norm",main='QQP dei residui')
+```
+
+Rispetto a queste i grafici sembrano essere qualitativamente conformi, tranne per la presenza di alcuni outlier che verranno trattati in seguito.
+Il fatto che alcune covariate siano valutate poco significative suggerisce che possano esserci correlazioni, potenzialmente anche molto alte, tra di loro. Viene pertanto disegnato un grafico che le riassume:
+
+```{r, out.width = "85%", fig.align='center'}
+par(mfrow=c(1,1))
+corrplot::corrplot(cor(train), method = "number", type = "upper", diag = FALSE , number.cex = 0.6)
+```
+Come lo stesso modello aveva indirettamente suggerito esiste una grossa correlazione tra la variabile crim e le due variabili rad e tax (rispettivamente l'indice di accessibilità alle autostrade radiali e l'intero valore dell'aliquota imposta sulla proprietà per $ 10.000), che è coerente con il senso comune (tra l'altro il grafico sottolinea che anche tra le sole due variabili tax e rad esiste una forte correlazione). 
+Questo sarebbe quindi il motivo per cui, ad esempio, la variabile crim è ritenuta dal modello poco significativa; le informazioni che questa contiene sono già ampiamente raccolte dalle altre due covariate rad e tax (ritenute al contrario molto significative). Ragionamenti analoghi possono essere svolti per altri gruppi di variabili.   
+
+Dal momento che si sono evidenziate grosse correlazioni tra le covariate è spontaneo domandarsi se queste confluiscano in qualcosa di più forte, come una collinearità. vengono pertanto calcolati i vif:
+
+```{r, out.width = "85%", fig.align='center'}
+#calcolo dei VIF (serve la libreria car)
+vif(modellolm)
+```
+
+Si osserva che il vif di rad è >10, e pertanto conferma le suposizioni sulla collinearità del modello (da notare che anche il vif di tax è molto alto seppur non superiore a 10).
+Per alleggerire il modello dalle covariate meno significative vengono impiegati metodi di step-forward,backward e both:
+
+```{r, out.width = "85%", fig.align='center'}
+#selezioniamo le variabili con una step-forward
+(forward<-ols_step_forward_p(modellolm, penter = 0.1))
+
+#selezioniamo le variabili con una step-backward
+(backward<-ols_step_backward_p(modellolm, prem = 0.1))
+
+#selezioniamo le variabili con una step-both
+(both<-ols_step_both_p(modellolm, pent=0.1, prem = 0.1))
+
+```
+
+Questi evidenziano tutti lo stesso risultato: eliminare le covariate crim e indus; citate fin dall'inizio.
+Eliminate le covariate crim e indus viene impostato il nuovo modello e controllati nuovamente i vif per accertarsi delle migliorie apportate:
+
+```{r, out.width = "85%", fig.align='center'}
+modellolm2<-modellolm<-lm(medv~lstat+rm+ptratio+black+dis+nox+chas+age+rad+tax+zn, data=train)
+summary(modellolm2)
+
+#scatterplot dei residui vs valori stimati
+plot(modellolm2$fitted.values, modellolm2$residuals, 
+     main='Residui vs valori stimati', lwd=2, xlab='Y stimati', ylab='Residui')
+abline(h=0, lwd=2)
+
+#la vicinanza dei punti sul grafico suggerirebbe l'impiego di una trasformazione 
+#logaritmica sulla risposta (medv).
+#tramite la trasformazione si osserverebbe un aumento del R^2 del modello e una 
+#nuvola di dati meno densa. Questa strada alternativa è comunque valida. 
+
+#QQ Plot dei residui
+qqPlot(modellolm2$residuals,distribution = "norm",main='QQP dei residui')
+
+#calcolo dei VIF
+vif(modellolm2)
+```
+A questo punto i coefficienti sono tutti sufficientemente sigificativi, si torna pertanto alle ipotesi sul modello:  
+
+```{r, out.width = "85%", fig.align='center'}
+#controllo della varianza costante: (package 'car')
+ncvTest(modellolm2)
+
+#il test ci conferma l'ipotesi di varianza costante.
+#sembrano esserci tuttavia alcuni outlier, effettuiamo un test per verificarlo
+
+outlierTest(modellolm2) # Bonferroni p-value for most extreme obs (H0 <-> il 
+#dato non è un outlier)
+
+#sono effettivamente presenti degli outlier di cui è possibile determinare 
+#l'influenza sul modello
+#tramite un influencePlot
+influencePlot(modellolm2)
+
+#il modello globale viene in effetti influenzato, ma controlliamo se questo 
+#accade anche per la stima dei singoli parametri
+dfbetasPlots(modellolm2)
+
+#Qui gli ouliers non danno particolari problemi, pertanto siamo portati a 
+#eliminarli dal dataset
+train<-train[-c(279,280,274),]
+
+```
+
+Viene infine calcolato l'MSE rispetto al test set:
+
+```{r, out.width = "85%", fig.align='center'}
+ypred_lm<-predict(modellolm2,test)
+mean((ypred_lm - test$medv)^2)
+```
+Il secondo metodo impiegato per prevedere la risposta medv è il metodo ridge. 
+Sappiamo che in generale la ridge regression viene utilizzata per fare previsione e non per spiegare al meglio la varianza, questo ci porta a pensare che potenzialmente l'MSE calcolato dal nuovo metodo potrebbe essere migliore del precedente.
+Impostando il modello ridge si ottiene:
+
+```{r, out.width = "85%", fig.align='center'}
+#metodo ridge
+
+#costruisco la matrice X
+x_train = model.matrix(medv~., data=train)[,-1] 
+#scelgo una griglia di valori per i lambda
+grid = 10^seq(-5, 5, length = 100)
+#applico il modello ridge
+modelloridge = glmnet(x_train, train$medv, alpha = 0, lambda = grid)
+
+#calcolo valori previsti per ogni lambda nella griglia
+x_test = model.matrix(medv~., data=test)[,-1] 
+all_predict <- predict(modelloridge, s = grid, newx = x_test)
+#calcolo MSE con i valori osservati
+MSE<-colMeans((all_predict-test$medv)^2)
+#trovo il minimo e il lambda corrispondente
+(min_MSE<-min(MSE))
+
+(lambda_opt<-grid[which(MSE==min_MSE)])
+
+#rappresento graficamente l'MSE al variare di lambda e il minimo
+plot(grid,MSE,type='l',col='blue', main = "MSE sull''intera griglia")
+points(lambda_opt,min_MSE,col="red",cex=1)
+plot(grid[1:60],MSE[1:60],type='l',col='blue', main = "MSE in un intorno dello 0")
+points(lambda_opt,min_MSE,col="red",cex=1)
+
+#con il lambda ottimale calcolo i coefficenti
+modelloridge2 = glmnet(x_train, train$medv, alpha = 0, lambda = lambda_opt)
+modelloridge2$beta
+```
+
+In linea con l'osservazione precedente, il modello ridge esibisce una capacità predittiva maggiore rispetto al modello ML. 
+Può essere inoltre interessante commentare che il modello ridge, nella sua formulazione di problema di ottimizzazione vincolata, diminuisce la probabilità di over-fitting operando un controllo sulla grandezza dei coefficienti che, come è possibile constatare sopra, si sono molto ridotti in modulo rispetto al caso ML. 
+In definitiva i coefficienti più significativi per questo metodo sono riferiti alle covariate: chas, nox, rm e dis. Per prevedere il prezzo delle case a Boston è quindi molto rilevante conoscere la concentrazione di ossido di azoto della zona, la vicinanza a un fiume, il numero medio di stanze e la vicinanza a centri per l'impiego. 
+
+Il terzo metodo impiegato per prevedere la risposta medv è il metodo lasso. 
+Procedendo in modo simile al metodo precedente si ottiene: 
+```{r, out.width = "85%", fig.align='center'}
+#modello lasso
+
+modellolasso = glmnet(x_train, train$medv, alpha = 1, lambda = grid)
+
+all_predict_lasso <- predict(modellolasso, s = grid, newx = x_test)
+#calcolo MSE con i valori osservati
+MSE_lasso<-colMeans((all_predict_lasso-test$medv)^2)
+#trovo il minimo e il lambda corrispondente
+(min_MSE_lasso<-min(MSE_lasso))
+
+(lambda_opt_lasso<-grid[which(MSE_lasso==min_MSE_lasso)])
+
+plot(grid,MSE_lasso,type='l',col='blue', main = "MSE sull''intera griglia")
+points(lambda_opt_lasso,min_MSE_lasso,col="red",cex=1)
+plot(grid[1:40],MSE_lasso[1:40],type='l',col='blue', main = "MSE in un intorno dello 0")
+points(lambda_opt_lasso,min_MSE_lasso,col="red",cex=1)
+
+modellolasso2 = glmnet(x_train, train$medv, alpha = 1, lambda = lambda_opt_lasso)
+modellolasso2$beta
+```
+Il modello lasso esibisce una capacità predittiva minore di entrambi i metodi discussi in precedenza; tuttavia è noto che uno dei principali vantaggi di questo metodo è il fatto che possano annullarsi alcuni dei coefficienti del modello (questo è conseguenza del tipo di vincolo nel problema di ottimizzazione vincolata, che fa cercare la soluzione sul bordo di un quadrato e non di un cerchio, come per la ridge). Purtroppo però la lasso non riesce a dare qualche informazione in più di quelle già note, annullando solamemte il coefficiente di indus che era già stata scartato da tutti i modelli precedenti; ed evidenziando come covariate più significative esattamente le stesse ottenute dal modello ridge: chas, nox, rm e dis.
+
+L'ultimo metodo impiegato per prevedere la risposta medv è il metodo pcr:
+Anche in questo caso viene impostato il modello:
+```{r, out.width = "85%", fig.align='center'}
+#modello PCR
+
+#dal momento che la covariata chas è una dummy, ha poco senso includerla 
+#in questo modello, pertanto la escludiamo
+modellopcr<-pcr(train$medv~.-chas,data=train,scale=TRUE,validation="CV")
+summary(modellopcr)
+validationplot(modellopcr)
+validationplot(modellopcr,val.type = "MSEP")
+validationplot(modellopcr,val.type = "R2")
+modellopcr$loadings
+
+all_predict_pcr<-predict(modellopcr,x_test[,-4],ncomp=12)
+err_pcr<-mean((all_predict_pcr-test$medv)^2)
+err_pcr
+```
+Il metodo pcr evidenzia come siano già sufficienti per spiegare gran parte della varianza del modello le prime 4 componenti principali. Inoltre, grazie all'eliminazione della dummy chas, l'MSE è il più basso tra i modelli fino ad ora discussi se considerate tutte le componenti principali (si osservi, in più, che tutte le covariate selezionate dal modello sono realmente utilizzate nella determinazione dei loadings). 
+
+Le analisi effettuate su questo dataset hanno permesso di determinare modelli diversi in grado di predire il valore mediano del prezzo delle case a Boston in 1000$; rimane tuttavia il problema di decidere quale di questi sia il migliore. Ovviamente è a discrezione dell'utente impiegarne uno piuttosto che un altro sulla base delle esigenze, invero nel momento in cui si fosse interessati a un modello che non usi tutte le covariate in gioco, ma solamente quelle davvero significative, si potrebbe decidere di abbandonare il modello pcr per un modello ML o eventualmente un modello ridge raffinato (tolte le covariate meno significative). Al contrario se invece non ci fosse un limite massimo di covariate le osservazioni precedenti evidenzierebbero il modello pcr come metodo con maggiore potere predittivo.
+La vasta gamma di modelli lascia ampio margine di scelta e il loro utilizzo sul campo consente di trovare il migliore sulla base delle necessità.
+
